@@ -1,35 +1,33 @@
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, Response
 from pypdf import PdfReader, PdfWriter
 import pdfplumber
-from pdf2image import convert_from_bytes
-import pytesseract
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import io, re, uuid, zipfile
+import io, re, uuid, zipfile, os, tempfile, gc
 from datetime import datetime
+from collections import Counter
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
+# Sessions store temp file PATHS, not raw bytes
 SESSIONS = {}
 
-# ─── MONTH MAP ──────────────────────────────────────────────────────────────
 MONTHS = {
     'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
     'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12
 }
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
 def parse_date(date_str):
-    """Parse Indian date formats: '05 Apr 2025', '05-Apr-25', '05/04/2025'"""
     date_str = date_str.strip()
-    # DD Mon YYYY or DD-Mon-YYYY or DD Mon YY
     m = re.match(r'(\d{1,2})[\s\-/]([A-Za-z]{3})[\s\-/](\d{2,4})', date_str)
     if m:
         d, mo, y = int(m.group(1)), MONTHS.get(m.group(2).lower(), 0), int(m.group(3))
         if y < 100: y += 2000
         if mo: return datetime(y, mo, d)
-    # DD/MM/YYYY
     m = re.match(r'(\d{1,2})/(\d{1,2})/(\d{4})', date_str)
     if m:
         d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -37,7 +35,6 @@ def parse_date(date_str):
     return None
 
 def parse_amount(amt_str):
-    """Parse '1,299.00' or '(1,299.00)' → float"""
     if not amt_str:
         return None
     s = str(amt_str).strip().replace(',', '').replace(' ', '')
@@ -49,38 +46,73 @@ def parse_amount(amt_str):
     except:
         return None
 
-# ─── SBI CARD PARSER ─────────────────────────────────────────────────────────
-DATE_RE = re.compile(
-    r'\b(\d{1,2}[\s\-/][A-Za-z]{3}[\s\-/]\d{2,4}|\d{1,2}/\d{1,2}/\d{4})\b'
-)
+DATE_RE = re.compile(r'\b(\d{1,2}[\s\-/][A-Za-z]{3}[\s\-/]\d{2,4}|\d{1,2}/\d{1,2}/\d{4})\b')
 AMOUNT_RE = re.compile(r'[\d,]+\.\d{2}')
 
-def extract_text_from_pdf(pdf_bytes):
-    """Try pdfplumber first; fall back to OCR if text is sparse."""
-    text_pages = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+# ─── Temp file helpers ────────────────────────────────────────────────────────
+
+def save_to_tmp(data: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix='.pdf')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data)
+    return path
+
+def delete_tmp(path: str):
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+
+def cleanup_session(session_id):
+    session = SESSIONS.pop(session_id, {})
+    for bucket in ('unlocked', 'locked'):
+        for path in session.get(bucket, {}).values():
+            delete_tmp(path)
+    if 'xlsx_path' in session:
+        delete_tmp(session['xlsx_path'])
+
+# ─── PDF parsing: file-path-based to avoid holding full bytes in RAM ──────────
+
+def extract_text_streamed(pdf_path):
+    """Extract text page-by-page. OCR fallback is also page-by-page at lower DPI."""
+    pages_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        total_pages = len(pdf.pages)
         for page in pdf.pages:
             t = page.extract_text() or ''
-            text_pages.append(t)
-    full_text = '\n'.join(text_pages)
-    # If less than 100 chars per page → likely scanned, use OCR
-    if len(full_text.strip()) < 100 * max(len(text_pages), 1):
-        images = convert_from_bytes(pdf_bytes, dpi=200)
-        ocr_pages = [pytesseract.image_to_string(img) for img in images]
-        full_text = '\n'.join(ocr_pages)
+            pages_text.append(t)
+            page.flush_cache()
+
+    full_text = '\n'.join(pages_text)
+
+    if len(full_text.strip()) < 100 * max(len(pages_text), 1):
+        try:
+            from pdf2image import convert_from_path
+            import pytesseract
+            ocr_pages = []
+            for page_num in range(1, total_pages + 1):
+                images = convert_from_path(pdf_path, dpi=150,
+                                           first_page=page_num, last_page=page_num)
+                if images:
+                    ocr_pages.append(pytesseract.image_to_string(images[0]))
+                    del images
+                    gc.collect()
+            full_text = '\n'.join(ocr_pages)
+        except Exception:
+            pass
+
     return full_text
 
-def extract_tables_from_pdf(pdf_bytes):
-    """Extract tables via pdfplumber."""
+def extract_tables_streamed(pdf_path):
     all_tables = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             all_tables.extend(tables)
+            page.flush_cache()
     return all_tables
 
 def detect_columns(header_row):
-    """Map header columns to: date, description, debit, credit, amount, type."""
     mapping = {}
     for i, cell in enumerate(header_row):
         if not cell: continue
@@ -100,12 +132,10 @@ def detect_columns(header_row):
     return mapping
 
 def parse_transactions_from_tables(tables):
-    """Extract transactions from PDF tables."""
     transactions = []
     for table in tables:
         if not table or len(table) < 2:
             continue
-        # Find header row
         header_idx = None
         for i, row in enumerate(table):
             if not row: continue
@@ -126,18 +156,15 @@ def parse_transactions_from_tables(tables):
             if not parsed_date:
                 continue
             desc = str(row[col_map.get('description', 1)] or '').strip() if col_map.get('description') is not None else ''
-            # Determine amount and type
             amount = None
             txn_type = ''
             if 'debit' in col_map and 'credit' in col_map:
                 debit_val = parse_amount(row[col_map['debit']])
                 credit_val = parse_amount(row[col_map['credit']])
                 if debit_val:
-                    amount = debit_val
-                    txn_type = 'Debit'
+                    amount = debit_val; txn_type = 'Debit'
                 elif credit_val:
-                    amount = credit_val
-                    txn_type = 'Credit'
+                    amount = credit_val; txn_type = 'Credit'
             elif 'amount' in col_map:
                 amount = parse_amount(row[col_map['amount']])
                 if 'type' in col_map:
@@ -156,104 +183,81 @@ def parse_transactions_from_tables(tables):
     return transactions
 
 def parse_transactions_from_text(text):
-    """Fallback: parse transactions from raw text lines."""
     transactions = []
-    lines = text.split('\n')
-    for line in lines:
+    for line in text.split('\n'):
         line = line.strip()
         dates = DATE_RE.findall(line)
-        if not dates:
-            continue
+        if not dates: continue
         amounts = AMOUNT_RE.findall(line)
-        if not amounts:
-            continue
+        if not amounts: continue
         parsed_date = parse_date(dates[0])
-        if not parsed_date:
-            continue
-        # Remove date and amounts from line to get description
+        if not parsed_date: continue
         desc = line
-        for d in dates:
-            desc = desc.replace(d, '')
-        for a in amounts:
-            desc = desc.replace(a, '').replace(',', '')
-        # Clean up type keywords
-        txn_type = 'Debit'
-        if re.search(r'\b(cr|credit|payment|reversal)\b', desc, re.I):
-            txn_type = 'Credit'
+        for d in dates: desc = desc.replace(d, '')
+        for a in amounts: desc = desc.replace(a, '').replace(',', '')
+        txn_type = 'Credit' if re.search(r'\b(cr|credit|payment|reversal)\b', desc, re.I) else 'Debit'
         desc = re.sub(r'\b(debit|credit|dr|cr)\b', '', desc, flags=re.I).strip(' -|/')
         desc = re.sub(r'\s{2,}', ' ', desc).strip()
         amount = parse_amount(amounts[-1])
-        if not amount:
-            continue
-        transactions.append({
-            'date': parsed_date,
-            'description': desc,
-            'amount': abs(amount),
-            'type': txn_type,
-        })
+        if not amount: continue
+        transactions.append({'date': parsed_date, 'description': desc,
+                             'amount': abs(amount), 'type': txn_type})
     return transactions
 
 def extract_account_info(text):
-    """Extract card number and statement period from text."""
     info = {}
-    # Card / account number
     m = re.search(r'(?:account|card)[\s\w]*?:?\s*([Xx*\d]{4}[\s\-]?[Xx*\d]{4}[\s\-]?[Xx*\d]{4}[\s\-]?[\dXx*]{4})', text, re.I)
     if m: info['card_number'] = m.group(1).strip()
-    # Period
     m = re.search(r'(?:period|from|statement date)[:\s]+([A-Za-z\d\s]+?)\s+to\s+([A-Za-z\d\s]+?)(?:\n|$)', text, re.I)
     if m:
         info['period_from'] = m.group(1).strip()
         info['period_to'] = m.group(2).strip()
     return info
 
-def parse_pdf(pdf_bytes, source_name=''):
-    """Full parse pipeline: tables first, text fallback."""
-    text = extract_text_from_pdf(pdf_bytes)
-    tables = extract_tables_from_pdf(pdf_bytes)
+def parse_pdf_from_path(pdf_path, source_name=''):
+    """Parse a PDF given a file path — no full bytes held in RAM."""
+    text = extract_text_streamed(pdf_path)
+    tables = extract_tables_streamed(pdf_path)
     account_info = extract_account_info(text)
     account_info['source'] = source_name
 
     transactions = parse_transactions_from_tables(tables)
     if len(transactions) < 2:
-        # Fallback to text parsing
         transactions = parse_transactions_from_text(text)
+
+    del text, tables
+    gc.collect()
 
     for t in transactions:
         t['source'] = source_name
-
     return account_info, transactions
 
-# ─── EXCEL BUILDER ───────────────────────────────────────────────────────────
+# ─── Excel builder ────────────────────────────────────────────────────────────
+
 def build_excel(all_transactions, account_infos):
     wb = openpyxl.Workbook()
 
-    # ── Color palette ──
-    HDR_FILL  = PatternFill('solid', start_color='1F3864')  # dark navy
-    ALT_FILL  = PatternFill('solid', start_color='EBF0FA')  # light blue
-    DEB_FILL  = PatternFill('solid', start_color='FFF0F0')  # light red
-    CRD_FILL  = PatternFill('solid', start_color='F0FFF4')  # light green
-    SUM_FILL  = PatternFill('solid', start_color='FFF8E1')  # light yellow
+    HDR_FILL = PatternFill('solid', start_color='1F3864')
+    ALT_FILL = PatternFill('solid', start_color='EBF0FA')
+    DEB_FILL = PatternFill('solid', start_color='FFF0F0')
+    CRD_FILL = PatternFill('solid', start_color='F0FFF4')
+    SUM_FILL = PatternFill('solid', start_color='FFF8E1')
     HDR_FONT  = Font(name='Arial', bold=True, color='FFFFFF', size=10)
     BODY_FONT = Font(name='Arial', size=10)
     BOLD_FONT = Font(name='Arial', bold=True, size=10)
-
     thin = Side(style='thin', color='D0D0D0')
     thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     def hdr_cell(ws, row, col, val, width=None):
         c = ws.cell(row=row, column=col, value=val)
-        c.font = HDR_FONT
-        c.fill = HDR_FILL
+        c.font = HDR_FONT; c.fill = HDR_FILL
         c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         c.border = thin_border
         if width: ws.column_dimensions[get_column_letter(col)].width = width
 
-    # ── Sheet 1: All Transactions ────────────────────────────────────────────
     ws = wb.active
     ws.title = 'All Transactions'
     ws.freeze_panes = 'A3'
-
-    # Title row
     ws.merge_cells('A1:G1')
     title = ws['A1']
     title.value = 'SBI Card — Consolidated Statement'
@@ -261,78 +265,48 @@ def build_excel(all_transactions, account_infos):
     title.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 30
 
-    # Headers row 2
     headers = ['#', 'Date', 'Description', 'Type', 'Debit (₹)', 'Credit (₹)', 'Source File']
     widths  = [5,  14,    45,             12,     16,           16,            30]
     for col, (h, w) in enumerate(zip(headers, widths), 1):
         hdr_cell(ws, 2, col, h, w)
     ws.row_dimensions[2].height = 22
 
-    # Sort transactions by date
     sorted_txns = sorted(all_transactions, key=lambda x: x['date'])
 
-    # Data rows
-    debit_total = 0
-    credit_total = 0
     for i, txn in enumerate(sorted_txns, 1):
         row = i + 2
         is_credit = txn['type'].lower() in ('credit', 'cr', 'payment', 'reversal')
         fill = CRD_FILL if is_credit else (ALT_FILL if i % 2 == 0 else PatternFill())
-
-        vals = [
-            i,
-            txn['date'].strftime('%d %b %Y'),
-            txn['description'],
-            txn['type'],
-            None if is_credit else txn['amount'],
-            txn['amount'] if is_credit else None,
-            txn['source'],
-        ]
+        vals = [i, txn['date'].strftime('%d %b %Y'), txn['description'], txn['type'],
+                None if is_credit else txn['amount'],
+                txn['amount'] if is_credit else None,
+                txn['source']]
         for col, val in enumerate(vals, 1):
             c = ws.cell(row=row, column=col, value=val)
-            c.font = BODY_FONT
-            c.fill = fill
-            c.border = thin_border
+            c.font = BODY_FONT; c.fill = fill; c.border = thin_border
             if col == 1:
                 c.alignment = Alignment(horizontal='center')
             elif col in (5, 6) and val is not None:
                 c.number_format = '#,##0.00'
                 c.alignment = Alignment(horizontal='right')
-                if is_credit: credit_total += val
-                else: debit_total += val
 
-    # Totals row
     total_row = len(sorted_txns) + 3
-    ws.cell(row=total_row, column=3, value='TOTAL').font = BOLD_FONT
-    ws.cell(row=total_row, column=3).fill = SUM_FILL
-    ws.cell(row=total_row, column=3).border = thin_border
-
     for col in range(1, 8):
-        c = ws.cell(row=total_row, column=col)
-        c.fill = SUM_FILL
+        ws.cell(row=total_row, column=col).fill = SUM_FILL
+        ws.cell(row=total_row, column=col).border = thin_border
+    ws.cell(row=total_row, column=3, value='TOTAL').font = BOLD_FONT
+
+    for col, formula in [(5, f'=SUM(E3:E{total_row-1})'), (6, f'=SUM(F3:F{total_row-1})')]:
+        c = ws.cell(row=total_row, column=col, value=formula)
+        c.font = BOLD_FONT; c.fill = SUM_FILL
+        c.number_format = '#,##0.00'
+        c.alignment = Alignment(horizontal='right')
         c.border = thin_border
 
-    deb_cell = ws.cell(row=total_row, column=5)
-    deb_cell.value = f'=SUM(E3:E{total_row-1})'
-    deb_cell.font = BOLD_FONT
-    deb_cell.fill = SUM_FILL
-    deb_cell.number_format = '#,##0.00'
-    deb_cell.alignment = Alignment(horizontal='right')
-    deb_cell.border = thin_border
-
-    crd_cell = ws.cell(row=total_row, column=6)
-    crd_cell.value = f'=SUM(F3:F{total_row-1})'
-    crd_cell.font = BOLD_FONT
-    crd_cell.fill = SUM_FILL
-    crd_cell.number_format = '#,##0.00'
-    crd_cell.alignment = Alignment(horizontal='right')
-    crd_cell.border = thin_border
-
-    # ── Sheet 2: Summary ────────────────────────────────────────────────────
+    # Summary sheet
     ws2 = wb.create_sheet('Summary')
     ws2.column_dimensions['A'].width = 30
     ws2.column_dimensions['B'].width = 22
-
     ws2.merge_cells('A1:B1')
     t2 = ws2['A1']
     t2.value = 'Statement Summary'
@@ -355,49 +329,34 @@ def build_excel(all_transactions, account_infos):
         if fill: c1.fill = fill; c2.fill = fill
 
     r = 2
-    hdr_cell(ws2, r, 1, 'Metric'); hdr_cell(ws2, r, 2, 'Value')
-    r += 1
+    hdr_cell(ws2, r, 1, 'Metric'); hdr_cell(ws2, r, 2, 'Value'); r += 1
     sum_row(r, 'Total Transactions', len(sorted_txns), fmt='0'); r += 1
     sum_row(r, 'Date Range From', sorted_txns[0]['date'].strftime('%d %b %Y') if sorted_txns else '-', fmt='@'); r += 1
     sum_row(r, 'Date Range To',   sorted_txns[-1]['date'].strftime('%d %b %Y') if sorted_txns else '-', fmt='@'); r += 1
-    sum_row(r, 'Source Files',    len(account_infos), fmt='0'); r += 1
-    r += 1
+    sum_row(r, 'Source Files', len(account_infos), fmt='0'); r += 2
     bold_row(r, 'Total Debits (₹)',  f"='All Transactions'!E{total_row}", DEB_FILL); r += 1
     bold_row(r, 'Total Credits (₹)', f"='All Transactions'!F{total_row}", CRD_FILL); r += 1
-    bold_row(r, 'Net Spend (₹)',     f"='All Transactions'!E{total_row}-'All Transactions'!F{total_row}", SUM_FILL); r += 1
-
-    # Per-file breakdown
-    r += 1
-    hdr_cell(ws2, r, 1, 'Source File'); hdr_cell(ws2, r, 2, 'Transactions')
-    r += 1
-    from collections import Counter
+    bold_row(r, 'Net Spend (₹)',     f"='All Transactions'!E{total_row}-'All Transactions'!F{total_row}", SUM_FILL); r += 2
+    hdr_cell(ws2, r, 1, 'Source File'); hdr_cell(ws2, r, 2, 'Transactions'); r += 1
     for src, cnt in Counter(t['source'] for t in sorted_txns).items():
         sum_row(r, src, cnt, fmt='0'); r += 1
 
-    # ── Sheet 3: Source Details ─────────────────────────────────────────────
+    # Source Details sheet
     ws3 = wb.create_sheet('Source Details')
-    ws3.column_dimensions['A'].width = 35
-    ws3.column_dimensions['B'].width = 22
-    ws3.column_dimensions['C'].width = 22
-    ws3.column_dimensions['D'].width = 22
-
+    for col, w in zip('ABCD', [35, 22, 22, 22]):
+        ws3.column_dimensions[col].width = w
     ws3.merge_cells('A1:D1')
     t3 = ws3['A1']
     t3.value = 'Source File Details'
     t3.font = Font(name='Arial', bold=True, size=13, color='1F3864')
     t3.alignment = Alignment(horizontal='center')
     ws3.row_dimensions[1].height = 28
-
-    hdr_cell(ws3, 2, 1, 'File Name')
-    hdr_cell(ws3, 2, 2, 'Card Number')
-    hdr_cell(ws3, 2, 3, 'Period From')
-    hdr_cell(ws3, 2, 4, 'Period To')
-
+    for col, label in enumerate(['File Name', 'Card Number', 'Period From', 'Period To'], 1):
+        hdr_cell(ws3, 2, col, label)
     for i, info in enumerate(account_infos, 3):
         for col, key in enumerate(['source','card_number','period_from','period_to'], 1):
             c = ws3.cell(row=i, column=col, value=info.get(key, '-'))
-            c.font = BODY_FONT
-            c.border = thin_border
+            c.font = BODY_FONT; c.border = thin_border
             c.fill = ALT_FILL if i % 2 == 0 else PatternFill()
 
     buf = io.BytesIO()
@@ -405,7 +364,8 @@ def build_excel(all_transactions, account_infos):
     buf.seek(0)
     return buf.getvalue()
 
-# ─── ROUTES ──────────────────────────────────────────────────────────────────
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -416,52 +376,61 @@ def unlock():
     session_id = request.form.get('session_id', str(uuid.uuid4()))
     files = request.files.getlist('pdfs')
 
-    has_session_data = session_id in SESSIONS and 'locked_data' in SESSIONS[session_id] and SESSIONS[session_id]['locked_data']
-    if not files and not has_session_data:
-        return jsonify({'error': 'No files uploaded'}), 400
+    session = SESSIONS.setdefault(session_id, {'unlocked': {}, 'locked': {}})
 
-    pending = {}
-    if has_session_data:
-        pending = dict(SESSIONS[session_id]['locked_data'])
+    # Merge previously locked + newly uploaded into pending
+    pending = dict(session.get('locked', {}))  # fname -> tmp_path
     for f in files:
         if f.filename:
-            pending[f.filename] = f.read()
+            path = save_to_tmp(f.read())
+            pending[f.filename] = path
 
-    unlocked_data = SESSIONS.get(session_id, {}).get('unlocked_data', {})
-    newly_locked = {}
-    unlocked = []
-    locked = []
+    if not pending and not session['unlocked']:
+        return jsonify({'error': 'No files uploaded'}), 400
 
-    for filename, file_bytes in pending.items():
+    new_locked = {}
+    unlocked_names = []
+    locked_names = []
+
+    for filename, tmp_path in pending.items():
         try:
-            reader = PdfReader(io.BytesIO(file_bytes))
+            with open(tmp_path, 'rb') as fh:
+                data = fh.read()
+            reader = PdfReader(io.BytesIO(data))
             if reader.is_encrypted:
                 result = reader.decrypt(password)
                 if result == 0:
-                    newly_locked[filename] = file_bytes
-                    locked.append(filename)
+                    new_locked[filename] = tmp_path
+                    locked_names.append(filename)
+                    del data
                     continue
             writer = PdfWriter()
             for page in reader.pages:
                 writer.add_page(page)
             buf = io.BytesIO()
             writer.write(buf)
-            unlocked_data[filename] = buf.getvalue()
-            unlocked.append(filename)
+            new_path = save_to_tmp(buf.getvalue())
+            delete_tmp(tmp_path)
+            session['unlocked'][filename] = new_path
+            unlocked_names.append(filename)
+            del data, buf
         except Exception:
-            newly_locked[filename] = file_bytes
-            locked.append(filename)
+            new_locked[filename] = tmp_path
+            locked_names.append(filename)
 
-    SESSIONS[session_id] = {
-        'unlocked_data': unlocked_data,
-        'locked_data': newly_locked,
-    }
+    # Clean up old locked tmp files that are no longer pending
+    for fname, old_path in session.get('locked', {}).items():
+        if fname not in new_locked:
+            delete_tmp(old_path)
+
+    session['locked'] = new_locked
+    gc.collect()
 
     return jsonify({
         'session_id': session_id,
-        'unlocked': unlocked,
-        'locked': locked,
-        'total_unlocked': len(unlocked_data),
+        'unlocked': unlocked_names,
+        'locked': locked_names,
+        'total_unlocked': len(session['unlocked']),
     })
 
 @app.route('/consolidate', methods=['POST'])
@@ -469,36 +438,45 @@ def consolidate():
     session_id = request.form.get('session_id', '')
     files = request.files.getlist('pdfs')
 
-    # Collect PDFs: from session unlocked_data or fresh upload
-    pdf_sources = {}
+    # Build map of fname -> (path, we_own_it)
+    pdf_path_map = {}
+
     if session_id and session_id in SESSIONS:
-        pdf_sources = dict(SESSIONS[session_id].get('unlocked_data', {}))
+        for fname, path in SESSIONS[session_id].get('unlocked', {}).items():
+            pdf_path_map[fname] = (path, False)
+
     for f in files:
         if f.filename:
-            data = f.read()
-            # Try to decrypt if needed (no password = unencrypted)
+            raw = f.read()
             try:
-                reader = PdfReader(io.BytesIO(data))
+                reader = PdfReader(io.BytesIO(raw))
                 if reader.is_encrypted:
                     return jsonify({'error': f'{f.filename} is still password-protected. Please unlock first.'}), 400
             except Exception:
                 pass
-            pdf_sources[f.filename] = data
+            path = save_to_tmp(raw)
+            del raw
+            pdf_path_map[f.filename] = (path, True)
 
-    if not pdf_sources:
+    if not pdf_path_map:
         return jsonify({'error': 'No PDFs to consolidate'}), 400
 
     all_transactions = []
     account_infos = []
     parse_errors = []
 
-    for filename, pdf_bytes in pdf_sources.items():
+    # Process files ONE AT A TIME — never hold all PDFs in RAM simultaneously
+    for filename, (pdf_path, owned) in pdf_path_map.items():
         try:
-            info, txns = parse_pdf(pdf_bytes, filename)
+            info, txns = parse_pdf_from_path(pdf_path, filename)
             account_infos.append(info)
             all_transactions.extend(txns)
         except Exception as e:
             parse_errors.append(f'{filename}: {str(e)}')
+        finally:
+            if owned:
+                delete_tmp(pdf_path)
+            gc.collect()
 
     if not all_transactions:
         return jsonify({
@@ -506,52 +484,74 @@ def consolidate():
             'parse_errors': parse_errors,
         }), 422
 
-    xlsx_bytes = build_excel(all_transactions, account_infos)
+    total_count = len(all_transactions)
+    files_count = len(pdf_path_map)
 
-    # Store for download
+    xlsx_bytes = build_excel(all_transactions, account_infos)
+    del all_transactions, account_infos
+    gc.collect()
+
+    # Save Excel to disk, not RAM
     dl_id = str(uuid.uuid4())
-    SESSIONS[dl_id] = {'xlsx': xlsx_bytes}
+    fd, xlsx_path = tempfile.mkstemp(suffix='.xlsx')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(xlsx_bytes)
+    del xlsx_bytes
+    SESSIONS[dl_id] = {'xlsx_path': xlsx_path}
 
     return jsonify({
         'download_id': dl_id,
-        'total_transactions': len(all_transactions),
-        'files_processed': len(account_infos),
+        'total_transactions': total_count,
+        'files_processed': files_count,
         'parse_errors': parse_errors,
     })
 
 @app.route('/download/excel/<dl_id>')
 def download_excel(dl_id):
-    if dl_id not in SESSIONS or 'xlsx' not in SESSIONS[dl_id]:
+    if dl_id not in SESSIONS or 'xlsx_path' not in SESSIONS[dl_id]:
         return jsonify({'error': 'Not found'}), 404
-    return send_file(
-        io.BytesIO(SESSIONS[dl_id]['xlsx']),
+    xlsx_path = SESSIONS[dl_id]['xlsx_path']
+
+    def generate():
+        with open(xlsx_path, 'rb') as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        delete_tmp(xlsx_path)
+        SESSIONS.pop(dl_id, None)
+
+    return Response(
+        generate(),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name='SBI_Consolidated_Statement.xlsx'
+        headers={'Content-Disposition': 'attachment; filename=SBI_Consolidated_Statement.xlsx'}
     )
 
 @app.route('/download/unlocked/<session_id>')
 def download_unlocked(session_id):
     if session_id not in SESSIONS:
         return jsonify({'error': 'Session not found'}), 404
-    unlocked_data = SESSIONS[session_id].get('unlocked_data', {})
-    if not unlocked_data:
+    unlocked = SESSIONS[session_id].get('unlocked', {})
+    if not unlocked:
         return jsonify({'error': 'No unlocked files'}), 404
-    if len(unlocked_data) == 1:
-        fname, data = next(iter(unlocked_data.items()))
-        return send_file(io.BytesIO(data), mimetype='application/pdf',
+
+    if len(unlocked) == 1:
+        fname, path = next(iter(unlocked.items()))
+        return send_file(path, mimetype='application/pdf',
                          as_attachment=True, download_name=f'unlocked_{fname}')
+
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for fname, data in unlocked_data.items():
-            zf.writestr(f'unlocked_{fname}', data)
+        for fname, path in unlocked.items():
+            zf.write(path, f'unlocked_{fname}')
     zip_buf.seek(0)
     return send_file(zip_buf, mimetype='application/zip',
                      as_attachment=True, download_name='unlocked_pdfs.zip')
 
 @app.route('/clear/<session_id>', methods=['POST'])
 def clear(session_id):
-    SESSIONS.pop(session_id, None)
+    cleanup_session(session_id)
     return jsonify({'ok': True})
 
 if __name__ == '__main__':
