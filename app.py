@@ -418,10 +418,10 @@ input[type=file]{display:none}
   </header>
 
   <div class="tabs">
-    <button class="tab active" id="tab1" onclick="switchTab(1)">
+    <button type="button" class="tab active" id="tab1" onclick="switchTab(1)">
       <span class="tab-badge" id="tbadge1">1</span>Unlock PDFs
     </button>
-    <button class="tab" id="tab2" onclick="switchTab(2)">
+    <button type="button" class="tab" id="tab2" onclick="switchTab(2)">
       <span class="tab-badge" id="tbadge2">2</span>Consolidate to Excel
     </button>
   </div>
@@ -439,9 +439,9 @@ input[type=file]{display:none}
     <div class="pw-row">
       <div class="pw-wrap">
         <input type="password" id="pw1" placeholder="Enter PDF password (e.g. DOB: 01011990)">
-        <button class="eye" onclick="toggleEye('pw1')">&#128065;</button>
+        <button type="button" class="eye" onclick="toggleEye('pw1')">&#128065;</button>
       </div>
-      <button class="btn btn-primary" id="unlockBtn" onclick="doUnlock()">&#128275; Unlock All</button>
+      <button type="button" class="btn btn-primary" id="unlockBtn" onclick="doUnlock()">&#128275; Unlock All</button>
     </div>
     <div class="prog-bar" id="prog1"><div class="prog-fill" id="pfill1"></div></div>
 
@@ -455,7 +455,7 @@ input[type=file]{display:none}
       <div class="result-card" id="okCard" style="display:none">
         <div class="card-hdr"><span class="badge bg">&#10003; Unlocked</span><span id="okCount"></span></div>
         <div class="flist" id="okList"></div>
-        <button class="btn btn-green btn-full" onclick="downloadUnlocked()">&#11015; Download Unlocked PDFs</button>
+        <button type="button" class="btn btn-green btn-full" onclick="downloadUnlocked()">&#11015; Download Unlocked PDFs</button>
       </div>
 
       <div id="retryWrap" style="display:none">
@@ -472,18 +472,18 @@ input[type=file]{display:none}
           <div class="pw-row" style="margin-top:16px">
             <div class="pw-wrap">
               <input type="password" id="pw2" placeholder="Try a different password...">
-              <button class="eye" onclick="toggleEye('pw2')">&#128065;</button>
+              <button type="button" class="eye" onclick="toggleEye('pw2')">&#128065;</button>
             </div>
-            <button class="btn btn-primary" onclick="doRetry()">&#128260; Retry</button>
+            <button type="button" class="btn btn-primary" onclick="doRetry()">&#128260; Retry</button>
           </div>
         </div>
       </div>
 
       <div class="action-row">
-        <button class="btn btn-primary" onclick="goConsolidate()" id="goConsBtn" style="display:none">
+        <button type="button" class="btn btn-primary" onclick="goConsolidate()" id="goConsBtn" style="display:none">
           &#128202; Consolidate to Excel &#8594;
         </button>
-        <button class="btn btn-outline" onclick="resetAll()">&#8635; Start Over</button>
+        <button type="button" class="btn btn-outline" onclick="resetAll()">&#8635; Start Over</button>
       </div>
     </div>
   </div>
@@ -510,7 +510,7 @@ input[type=file]{display:none}
       <div class="pill-wrap" id="pills2"></div>
     </div>
 
-    <button class="btn btn-primary btn-full" id="consolidateBtn" onclick="doConsolidate()" style="margin-top:24px;padding:16px;font-size:1rem">
+    <button type="button" class="btn btn-primary btn-full" id="consolidateBtn" onclick="doConsolidate()" style="margin-top:24px;padding:16px;font-size:1rem">
       &#128202; Generate Consolidated Excel
     </button>
     <div class="prog-bar" id="prog2"><div class="prog-fill" id="pfill2"></div></div>
@@ -524,7 +524,7 @@ input[type=file]{display:none}
         <div style="font-size:3rem;margin-bottom:10px">&#128994;</div>
         <div class="excel-title">Excel Ready!</div>
         <div class="excel-sub" id="xlsxMeta"></div>
-        <button class="btn btn-green btn-full" style="max-width:340px;margin:18px auto 0" onclick="downloadExcel()">
+        <button type="button" class="btn btn-green btn-full" style="max-width:340px;margin:18px auto 0" onclick="downloadExcel()">
           &#11015; Download Consolidated Excel
         </button>
       </div>
@@ -538,8 +538,16 @@ input[type=file]{display:none}
 var sessionId=null, downloadId=null, files1={}, freshFiles2={};
 
 function switchTab(n){
-  document.querySelectorAll('.tab').forEach(function(t,i){t.classList.toggle('active',i===n-1);});
-  document.querySelectorAll('.panel').forEach(function(p,i){p.classList.toggle('active',i===n-1);});
+  var tabs=['tab1','tab2'];
+  var panels=['panel1','panel2'];
+  tabs.forEach(function(id,i){
+    var el=document.getElementById(id);
+    if(el) el.classList.toggle('active',i===n-1);
+  });
+  panels.forEach(function(id,i){
+    var el=document.getElementById(id);
+    if(el) el.classList.toggle('active',i===n-1);
+  });
 }
 function goConsolidate(){
   var total=parseInt(document.getElementById('sOk').textContent)||0;
@@ -547,6 +555,10 @@ function goConsolidate(){
   document.getElementById('step2FromSession').style.display='block';
   document.getElementById('step2Fresh').style.display='none';
   switchTab(2);
+  setTimeout(function(){
+    var btn=document.getElementById('consolidateBtn');
+    if(btn) btn.scrollIntoView({behavior:'smooth',block:'center'});
+  },100);
 }
 function setupDrop(dzId,inputId,pillsId,store){
   var dz=document.getElementById(dzId), inp=document.getElementById(inputId);
@@ -679,6 +691,7 @@ function resetAll(){
   switchTab(1);
   window.scrollTo({top:0,behavior:'smooth'});
 }
+// Tab clicks handled via onclick on the button elements above
 setupDrop('dz1','fi1','pills1',files1);
 setupDrop('dz2','fi2','pills2',freshFiles2);
 </script>
