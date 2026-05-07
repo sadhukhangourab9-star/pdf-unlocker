@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF Unlocker</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --border: #1e1e2e;
+    --accent: #f97316;
+    --accent2: #fb923c;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --card: #13131d;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  /* Glow orb */
+  body::after {
+    content: '';
+    position: fixed;
+    top: -200px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(249,115,22,0.12) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 60px 24px;
+    position: relative;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 56px;
+  }
+
+  .logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .logo-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, var(--accent), #c2410c);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 0 30px rgba(249,115,22,0.35);
+  }
+
+  h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(2rem, 5vw, 3.2rem);
+    font-weight: 800;
+    letter-spacing: -1px;
+    background: linear-gradient(135deg, #fff 40%, var(--accent));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 1rem;
+    margin-top: 10px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  /* Drop zone */
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 20px;
+    padding: 52px 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s;
+    background: var(--card);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .dropzone::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 0%, rgba(249,115,22,0.06), transparent 60%);
+    opacity: 0;
+    transition: opacity 0.25s;
+  }
+
+  .dropzone.dragover, .dropzone:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 40px rgba(249,115,22,0.12);
+  }
+
+  .dropzone.dragover::before, .dropzone:hover::before { opacity: 1; }
+
+  .drop-icon {
+    font-size: 3rem;
+    margin-bottom: 16px;
+    filter: grayscale(0.3);
+  }
+
+  .drop-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  .drop-sub {
+    color: var(--muted);
+    font-size: 0.875rem;
+    font-family: 'DM Mono', monospace;
+  }
+
+  #fileInput { display: none; }
+
+  /* File pills */
+  #fileList {
+    margin-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .file-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 0.78rem;
+    font-family: 'DM Mono', monospace;
+    color: var(--text);
+    animation: popIn 0.2s ease;
+  }
+
+  .file-pill .remove {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.9rem;
+    transition: color 0.15s;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .file-pill .remove:hover { color: var(--red); }
+
+  @keyframes popIn {
+    from { transform: scale(0.85); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+
+  /* Password input */
+  .pw-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 28px;
+    align-items: stretch;
+  }
+
+  .pw-wrap {
+    flex: 1;
+    position: relative;
+  }
+
+  .pw-wrap input {
+    width: 100%;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 48px 14px 18px;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .pw-wrap input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(249,115,22,0.15);
+  }
+
+  .pw-wrap input::placeholder { color: var(--muted); }
+
+  .eye-btn {
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 1.1rem;
+    padding: 4px;
+    transition: color 0.15s;
+  }
+  .eye-btn:hover { color: var(--accent); }
+
+  .unlock-btn {
+    background: linear-gradient(135deg, var(--accent), #c2410c);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 28px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    white-space: nowrap;
+    box-shadow: 0 4px 20px rgba(249,115,22,0.3);
+  }
+
+  .unlock-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 28px rgba(249,115,22,0.45);
+  }
+
+  .unlock-btn:active { transform: translateY(0); }
+  .unlock-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  /* Progress bar */
+  #progressBar {
+    display: none;
+    margin-top: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    height: 8px;
+    overflow: hidden;
+  }
+
+  #progressFill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), #fb923c);
+    border-radius: 999px;
+    transition: width 0.4s ease;
+    animation: shimmer 1.5s infinite;
+    background-size: 200% 100%;
+  }
+
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  /* Results */
+  #results {
+    margin-top: 32px;
+    display: none;
+    animation: slideUp 0.3s ease;
+  }
+
+  @keyframes slideUp {
+    from { transform: translateY(16px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .result-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+
+  .result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    font-family: 'Syne', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+  }
+
+  .badge-green { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.25); }
+  .badge-red { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+  .badge-yellow { background: rgba(234,179,8,0.12); color: var(--yellow); border: 1px solid rgba(234,179,8,0.25); }
+
+  .file-result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .file-result-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.8rem;
+    background: var(--surface);
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+  .filename { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Download button */
+  .download-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    margin-top: 20px;
+    padding: 16px;
+    background: linear-gradient(135deg, rgba(34,197,94,0.15), rgba(34,197,94,0.05));
+    border: 1px solid rgba(34,197,94,0.3);
+    border-radius: 12px;
+    color: var(--green);
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+
+  .download-btn:hover {
+    background: linear-gradient(135deg, rgba(34,197,94,0.25), rgba(34,197,94,0.1));
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(34,197,94,0.2);
+    transform: translateY(-1px);
+  }
+
+  /* Retry section */
+  #retrySection {
+    display: none;
+    margin-top: 16px;
+  }
+
+  .retry-banner {
+    background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 12px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .retry-icon { font-size: 1.4rem; }
+
+  .retry-text .retry-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--red);
+  }
+
+  .retry-text .retry-sub {
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    margin-top: 2px;
+  }
+
+  /* Stats row */
+  .stats-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .stat-box {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .stat-num {
+    font-family: 'Syne', sans-serif;
+    font-size: 2rem;
+    font-weight: 800;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    margin-top: 2px;
+  }
+
+  .stat-box.green .stat-num { color: var(--green); }
+  .stat-box.red .stat-num { color: var(--red); }
+  .stat-box.total .stat-num { color: var(--accent); }
+
+  /* Reset */
+  .reset-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--muted);
+    padding: 10px 20px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 12px;
+  }
+  .reset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Loading spinner */
+  .spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🔓</div>
+    </div>
+    <h1>PDF Unlocker</h1>
+    <p class="subtitle">// remove passwords from multiple PDFs in one shot</p>
+  </header>
+
+  <!-- Step 1: Upload -->
+  <div id="step1">
+    <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
+      <div class="drop-icon">📂</div>
+      <div class="drop-title">Drop your PDFs here</div>
+      <div class="drop-sub">or click to browse — up to 50 files at once</div>
+      <input type="file" id="fileInput" accept=".pdf" multiple>
+    </div>
+
+    <div id="fileList"></div>
+
+    <div class="pw-row">
+      <div class="pw-wrap">
+        <input type="password" id="passwordInput" placeholder="Enter PDF password..." autocomplete="off">
+        <button class="eye-btn" id="eyeBtn" onclick="toggleEye()">👁</button>
+      </div>
+      <button class="unlock-btn" id="unlockBtn" onclick="startUnlock()">
+        🔓 Unlock All
+      </button>
+    </div>
+
+    <div id="progressBar"><div id="progressFill"></div></div>
+  </div>
+
+  <!-- Results -->
+  <div id="results">
+    <div class="stats-row">
+      <div class="stat-box total">
+        <div class="stat-num" id="statTotal">0</div>
+        <div class="stat-label">total files</div>
+      </div>
+      <div class="stat-box green">
+        <div class="stat-num" id="statUnlocked">0</div>
+        <div class="stat-label">unlocked</div>
+      </div>
+      <div class="stat-box red">
+        <div class="stat-num" id="statLocked">0</div>
+        <div class="stat-label">failed</div>
+      </div>
+    </div>
+
+    <div class="result-card" id="unlockedCard" style="display:none">
+      <div class="result-header">
+        <span class="badge badge-green">✓ Unlocked</span>
+        <span id="unlockedCount"></span>
+      </div>
+      <div class="file-result-list" id="unlockedList"></div>
+      <a class="download-btn" id="downloadBtn" href="#" onclick="downloadFiles(event)">
+        ⬇ Download Unlocked PDFs
+      </a>
+    </div>
+
+    <div id="retrySection">
+      <div class="retry-banner">
+        <span class="retry-icon">🔐</span>
+        <div class="retry-text">
+          <div class="retry-title" id="retryTitle">Files need a different password</div>
+          <div class="retry-sub" id="retrySub">Try a different password for the remaining files</div>
+        </div>
+      </div>
+
+      <div class="result-card">
+        <div class="result-header">
+          <span class="badge badge-red">✗ Password Failed</span>
+          <span id="lockedCount"></span>
+        </div>
+        <div class="file-result-list" id="lockedList"></div>
+
+        <div class="pw-row" style="margin-top: 20px;">
+          <div class="pw-wrap">
+            <input type="password" id="retryPasswordInput" placeholder="Try a different password..." autocomplete="off">
+            <button class="eye-btn" onclick="toggleRetryEye()">👁</button>
+          </div>
+          <button class="unlock-btn" onclick="retryUnlock()">
+            🔄 Retry
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <button class="reset-btn" onclick="resetAll()">↺ Start Over</button>
+  </div>
+</div>
+
+<script>
+  let selectedFiles = {};
+  let sessionId = null;
+  let currentLockedFiles = [];
+
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+
+  // Drag & Drop
+  dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+  dropzone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    addFiles(e.dataTransfer.files);
+  });
+  fileInput.addEventListener('change', () => addFiles(fileInput.files));
+
+  function addFiles(fileList) {
+    for (const f of fileList) {
+      if (f.name.toLowerCase().endsWith('.pdf')) {
+        selectedFiles[f.name] = f;
+      }
+    }
+    renderFileList();
+  }
+
+  function renderFileList() {
+    const list = document.getElementById('fileList');
+    list.innerHTML = '';
+    for (const name of Object.keys(selectedFiles)) {
+      const pill = document.createElement('div');
+      pill.className = 'file-pill';
+      pill.innerHTML = `📄 <span style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</span><span class="remove" onclick="removeFile('${name.replace(/'/g, "\\'")}')">×</span>`;
+      list.appendChild(pill);
+    }
+  }
+
+  function removeFile(name) {
+    delete selectedFiles[name];
+    renderFileList();
+  }
+
+  function toggleEye() {
+    const inp = document.getElementById('passwordInput');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  }
+
+  function toggleRetryEye() {
+    const inp = document.getElementById('retryPasswordInput');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  }
+
+  async function startUnlock() {
+    const files = Object.values(selectedFiles);
+    const password = document.getElementById('passwordInput').value;
+
+    if (files.length === 0) {
+      alert('Please upload at least one PDF file.');
+      return;
+    }
+
+    sessionId = null;
+    await runUnlock(files, password);
+  }
+
+  async function retryUnlock() {
+    const password = document.getElementById('retryPasswordInput').value;
+    await runUnlock([], password);
+  }
+
+  async function runUnlock(files, password) {
+    const btn = files.length > 0 ? document.getElementById('unlockBtn') : null;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Unlocking...'; }
+
+    const progressBar = document.getElementById('progressBar');
+    const progressFill = document.getElementById('progressFill');
+    progressBar.style.display = 'block';
+    progressFill.style.width = '30%';
+
+    const formData = new FormData();
+    formData.append('password', password);
+    if (sessionId) formData.append('session_id', sessionId);
+    for (const f of files) formData.append('pdfs', f);
+
+    try {
+      const res = await fetch('/unlock', { method: 'POST', body: formData });
+      const data = await res.json();
+
+      progressFill.style.width = '100%';
+      setTimeout(() => { progressBar.style.display = 'none'; progressFill.style.width = '0%'; }, 500);
+
+      sessionId = data.session_id;
+      renderResults(data);
+
+    } catch (err) {
+      alert('Something went wrong: ' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '🔓 Unlock All'; }
+    }
+  }
+
+  function renderResults(data) {
+    document.getElementById('results').style.display = 'block';
+
+    const total = data.unlocked.length + data.locked.length + (data.total_unlocked - data.unlocked.length);
+    document.getElementById('statTotal').textContent = data.total_unlocked + data.locked.length;
+    document.getElementById('statUnlocked').textContent = data.total_unlocked;
+    document.getElementById('statLocked').textContent = data.locked.length;
+
+    // Unlocked card
+    if (data.total_unlocked > 0) {
+      document.getElementById('unlockedCard').style.display = 'block';
+      document.getElementById('unlockedCount').textContent = `${data.total_unlocked} file${data.total_unlocked !== 1 ? 's' : ''} ready`;
+      const ul = document.getElementById('unlockedList');
+      // Only re-render newly unlocked
+      if (data.unlocked.length > 0) {
+        for (const name of data.unlocked) {
+          const item = document.createElement('div');
+          item.className = 'file-result-item';
+          item.innerHTML = `<span class="status-dot dot-green"></span><span class="filename">${name}</span><span class="badge badge-green" style="font-size:0.7rem">unlocked</span>`;
+          ul.appendChild(item);
+        }
+      }
+    }
+
+    // Locked
+    const retrySection = document.getElementById('retrySection');
+    if (data.locked.length > 0) {
+      retrySection.style.display = 'block';
+      document.getElementById('retrySub').textContent = `${data.locked.length} file${data.locked.length !== 1 ? 's' : ''} couldn't be unlocked — try a different password`;
+      const ll = document.getElementById('lockedList');
+      ll.innerHTML = '';
+      for (const name of data.locked) {
+        const item = document.createElement('div');
+        item.className = 'file-result-item';
+        item.innerHTML = `<span class="status-dot dot-red"></span><span class="filename">${name}</span><span class="badge badge-red" style="font-size:0.7rem">wrong password</span>`;
+        ll.appendChild(item);
+      }
+    } else {
+      retrySection.style.display = 'none';
+    }
+
+    window.scrollTo({ top: document.getElementById('results').offsetTop - 20, behavior: 'smooth' });
+  }
+
+  function downloadFiles(e) {
+    e.preventDefault();
+    if (!sessionId) return;
+    window.location.href = `/download/${sessionId}`;
+  }
+
+  function resetAll() {
+    if (sessionId) {
+      fetch(`/clear/${sessionId}`, { method: 'POST' });
+      sessionId = null;
+    }
+    selectedFiles = {};
+    document.getElementById('fileList').innerHTML = '';
+    document.getElementById('passwordInput').value = '';
+    document.getElementById('retryPasswordInput').value = '';
+    document.getElementById('results').style.display = 'none';
+    document.getElementById('unlockedCard').style.display = 'none';
+    document.getElementById('unlockedList').innerHTML = '';
+    document.getElementById('lockedList').innerHTML = '';
+    document.getElementById('retrySection').style.display = 'none';
+    fileInput.value = '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+</script>
+</body>
+</html>
