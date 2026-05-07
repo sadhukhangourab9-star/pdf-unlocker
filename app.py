@@ -12,6 +12,7 @@ from collections import Counter
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 SESSIONS = {}
 
@@ -538,15 +539,15 @@ input[type=file]{display:none}
 var sessionId=null, downloadId=null, files1={}, freshFiles2={};
 
 function switchTab(n){
-  var tabs=['tab1','tab2'];
-  var panels=['panel1','panel2'];
-  tabs.forEach(function(id,i){
+  ['tab1','tab2'].forEach(function(id,i){
     var el=document.getElementById(id);
-    if(el) el.classList.toggle('active',i===n-1);
+    if(!el)return;
+    if(i===n-1){el.classList.add('active');}else{el.classList.remove('active');}
   });
-  panels.forEach(function(id,i){
+  ['panel1','panel2'].forEach(function(id,i){
     var el=document.getElementById(id);
-    if(el) el.classList.toggle('active',i===n-1);
+    if(!el)return;
+    if(i===n-1){el.classList.add('active');}else{el.classList.remove('active');}
   });
 }
 function goConsolidate(){
@@ -561,11 +562,29 @@ function goConsolidate(){
   },100);
 }
 function setupDrop(dzId,inputId,pillsId,store){
-  var dz=document.getElementById(dzId), inp=document.getElementById(inputId);
+  var dz=document.getElementById(dzId);
+  var inp=document.getElementById(inputId);
+  if(!dz||!inp)return;
+  // Remove old listeners by cloning the input element
+  var newInp=inp.cloneNode(true);
+  inp.parentNode.replaceChild(newInp,inp);
+  inp=newInp;
   dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('over');});
   dz.addEventListener('dragleave',function(){dz.classList.remove('over');});
-  dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('over');addFiles(e.dataTransfer.files,pillsId,store);});
-  inp.addEventListener('change',function(){addFiles(inp.files,pillsId,store);});
+  dz.addEventListener('drop',function(e){
+    e.preventDefault();dz.classList.remove('over');
+    addFiles(e.dataTransfer.files,pillsId,store);
+  });
+  inp.addEventListener('change',function(e){
+    if(e.target.files&&e.target.files.length>0){
+      addFiles(e.target.files,pillsId,store);
+    }
+  });
+  // Clicking dropzone triggers the (new) input
+  dz.onclick=function(e){
+    if(e.target.classList.contains('x'))return;
+    document.getElementById(inputId).click();
+  };
 }
 function addFiles(list,pillsId,store){
   for(var i=0;i<list.length;i++){if(list[i].name.toLowerCase().endsWith('.pdf'))store[list[i].name]=list[i];}
@@ -593,6 +612,7 @@ function runUnlock(flist,pw){
   var btn=document.getElementById('unlockBtn');
   btn.disabled=true; btn.innerHTML='<span class="spin"></span> Unlocking...';
   showProg('prog1','pfill1',20);
+  startKeepalive();
   var fd=new FormData();
   fd.append('password',pw);
   if(sessionId)fd.append('session_id',sessionId);
@@ -606,7 +626,7 @@ function runUnlock(flist,pw){
       renderUnlockResults(data);
     })
     .catch(function(e){alert('Error: '+e.message);})
-    .finally(function(){btn.disabled=false;btn.innerHTML='&#128275; Unlock All';});
+    .finally(function(){stopKeepalive();btn.disabled=false;btn.innerHTML='&#128275; Unlock All';});
 }
 function renderUnlockResults(data){
   document.getElementById('unlockResults').style.display='block';
@@ -644,6 +664,7 @@ function doConsolidate(){
   var btn=document.getElementById('consolidateBtn');
   btn.disabled=true;btn.innerHTML='<span class="spin"></span> Extracting transactions...';
   showProg('prog2','pfill2',15);
+  startKeepalive();
   var fd=new FormData();
   var fromSession=document.getElementById('step2FromSession').style.display!=='none';
   if(fromSession&&sessionId){
@@ -670,7 +691,7 @@ function doConsolidate(){
       document.getElementById('consolidateResult').scrollIntoView({behavior:'smooth',block:'start'});
     })
     .catch(function(e){alert('Error: '+e.message);})
-    .finally(function(){btn.disabled=false;btn.innerHTML='&#128202; Generate Consolidated Excel';});
+    .finally(function(){stopKeepalive();btn.disabled=false;btn.innerHTML='&#128202; Generate Consolidated Excel';});
 }
 function downloadExcel(){if(downloadId)window.location.href='/download/excel/'+downloadId;}
 
@@ -694,6 +715,15 @@ function resetAll(){
 // Tab clicks handled via onclick on the button elements above
 setupDrop('dz1','fi1','pills1',files1);
 setupDrop('dz2','fi2','pills2',freshFiles2);
+
+// Keepalive: ping server every 30s to prevent 8-min timeout
+var _kaTimer=null;
+function startKeepalive(){
+  stopKeepalive();
+  _kaTimer=setInterval(function(){fetch('/ping').catch(function(){});},30000);
+}
+function stopKeepalive(){if(_kaTimer){clearInterval(_kaTimer);_kaTimer=null;}}
+
 </script>
 </body>
 </html>"""
@@ -790,6 +820,10 @@ def download_unlocked(session_id):
             zf.writestr(f'unlocked_{fname}', data)
     zip_buf.seek(0)
     return send_file(zip_buf, mimetype='application/zip', as_attachment=True, download_name='unlocked_statements.zip')
+
+@app.route('/ping')
+def ping():
+    return jsonify({'ok': True})
 
 @app.route('/clear/<session_id>', methods=['POST'])
 def clear(session_id):
